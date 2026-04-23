@@ -1,6 +1,7 @@
 export interface ReUploadResponse {
   asset_id: number
-  errors: null
+  version_id: number
+  errors: Record<string, unknown> | string[] | null
 }
 
 export interface Asset {
@@ -20,6 +21,6 @@ export enum Urls {
   API = 'https://portal-api.cfx.re/v1/',
   SSO = 'auth/discourse?return=',
   REUPLOAD = 'assets/{id}/re-upload',
-  UPLOAD_CHUNK = 'assets/{id}/upload-chunk',
-  COMPLETE_UPLOAD = 'assets/{id}/complete-upload'
+  UPLOAD_CHUNK = 'assets/{id}/versions/{versionId}/upload-chunk',
+  COMPLETE_UPLOAD = 'assets/{id}/versions/{versionId}/complete-upload'
 }

@@ -42,6 +42,17 @@ export async function preparePuppeteer(): Promise<void> {
   }
 }
 
+export async function verifyAuth(cookies: string): Promise<boolean> {
+  try {
+    await axios.get('https://portal-api.cfx.re/v1/me/assets', {
+      headers: { Cookie: cookies }
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
 export async function resolveAssetId(
   name: string,
   cookies: string
@@ -78,9 +89,11 @@ export async function resolveAssetId(
   )
 }
 
-export function getUrl(type: keyof typeof Urls, id?: string): string {
-  const url = Urls.API + Urls[type]
-  return id ? url.replace('{id}', id) : url
+export function getUrl(type: keyof typeof Urls, id?: string, versionId?: string): string {
+  let url = Urls.API + Urls[type]
+  if (id) url = url.replace('{id}', id)
+  if (versionId) url = url.replace('{versionId}', versionId)
+  return url
 }
 
 type TreeNode = string | Record<string, TreeNode[]> | null

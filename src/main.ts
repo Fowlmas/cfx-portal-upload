@@ -9,6 +9,7 @@ import { ReUploadResponse, SSOResponseBody } from './types'
 import {
   deleteIfExists,
   resolveAssetId,
+  verifyAuth,
   getEnv,
   getUrl,
   preparePuppeteer,
@@ -22,72 +23,80 @@ import {
 export async function run(): Promise<void> {
   await preparePuppeteer()
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  })
+  let assetId = core.getInput('assetId')
+  let assetName = core.getInput('assetName')
 
-  const page = await browser.newPage()
+  let zipPath = core.getInput('zipPath')
+  const makeZip = core.getInput('makeZip').toLowerCase() === 'true'
+  const skipUpload = core.getInput('skipUpload').toLowerCase() === 'true'
+
+  const chunkSize = parseInt(core.getInput('chunkSize'))
+  const maxRetries = parseInt(core.getInput('maxRetries'))
+
+  if (isNaN(chunkSize)) {
+    throw new Error('Invalid chunk size. Must be a number.')
+  }
+
+  if (isNaN(maxRetries)) {
+    throw new Error('Invalid max retries. Must be a number.')
+  }
+
+  if (!assetId && !assetName && !skipUpload) {
+    core.debug('No asset id or name provided, using repository name...')
+    assetName = basename(getEnv('GITHUB_WORKSPACE'))
+  }
+
+  const directCookie = `_t=${core.getInput('cookie')}`
+  let cookies: string | null = null
+
+  core.info('Trying direct cookie auth ...')
+  if (await verifyAuth(directCookie)) {
+    cookies = directCookie
+    core.info('Direct cookie auth successful.')
+  } else {
+    core.info('Direct auth failed, falling back to browser SSO ...')
+  }
+
+  if (!cookies) {
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    })
+    const page = await browser.newPage()
+    try {
+      const redirectUrl = await getRedirectUrl(page, maxRetries)
+      await setForumCookie(browser, page)
+
+      await page.goto(redirectUrl, { waitUntil: 'networkidle0' })
+
+      if (!page.url().includes('portal.cfx.re')) {
+        throw new Error('Redirect failed. Make sure the provided Cookie is valid.')
+      }
+
+      cookies = await getCookies(browser)
+    } finally {
+      await browser.close()
+    }
+  }
 
   try {
-    let assetId = core.getInput('assetId')
-    let assetName = core.getInput('assetName')
-
-    let zipPath = core.getInput('zipPath')
-    const makeZip = core.getInput('makeZip').toLowerCase() === 'true'
-    const skipUpload = core.getInput('skipUpload').toLowerCase() === 'true'
-
-    const chunkSize = parseInt(core.getInput('chunkSize'))
-    const maxRetries = parseInt(core.getInput('maxRetries'))
-
-    if (isNaN(chunkSize)) {
-      throw new Error('Invalid chunk size. Must be a number.')
+    if (skipUpload) {
+      core.info('Skipping upload ...')
+      return
     }
 
-    if (isNaN(maxRetries)) {
-      throw new Error('Invalid max retries. Must be a number.')
+    core.info('Uploading file ...')
+
+    if (assetName) {
+      assetId = await resolveAssetId(assetName, cookies)
     }
 
-    // No asset id or name provided, using the repository name
-    // If skipUpload is true, we don't need to update the asset name
-    if (!assetId && !assetName && !skipUpload) {
-      core.debug('No asset id or name provided, using repository name...')
-      assetName = basename(getEnv('GITHUB_WORKSPACE'))
-    }
-
-    const redirectUrl = await getRedirectUrl(page, maxRetries)
-    await setForumCookie(browser, page)
-
-    await page.goto(redirectUrl, {
-      waitUntil: 'networkidle0'
-    })
-
-    if (page.url().includes('portal.cfx.re')) {
-      if (skipUpload) {
-        core.info('Redirected to CFX Portal. Skipping upload ...')
-        return
-      }
-
-      core.info('Redirected to CFX Portal. Uploading file ...')
-      const cookies = await getCookies(browser)
-
-      if (assetName) {
-        assetId = await resolveAssetId(assetName, cookies)
-      }
-
-      zipPath = await getZipPath(assetName, zipPath, makeZip)
-      await uploadZip(zipPath, assetId, chunkSize, cookies)
-    } else {
-      throw new Error(
-        'Redirect failed. Make sure the provided Cookie is valid.'
-      )
-    }
+    zipPath = await getZipPath(assetName, zipPath, makeZip)
+    await uploadZip(zipPath, assetId, chunkSize, cookies)
   } catch (error) {
     if (error instanceof Error) {
       core.setFailed(error.message)
     }
-  } finally {
-    await browser.close()
   }
 }
 
@@ -232,7 +241,7 @@ async function startReupload(
   assetId: string,
   chunkSize: number,
   cookies: string
-): Promise<void> {
+): Promise<number> {
   const stats = statSync(zipPath)
   const totalSize = stats.size
   const originalFileName = basename(zipPath)
@@ -256,17 +265,21 @@ async function startReupload(
     },
     {
       headers: {
-        Cookie: cookies
+        Cookie: cookies,
+        Origin: 'https://portal.cfx.re',
+        Referer: 'https://portal.cfx.re/'
       }
     }
   )
 
-  if (reUploadReponse.data.errors !== null) {
+  if (reUploadReponse.data.errors != null) {
     core.debug(JSON.stringify(reUploadReponse.data.errors))
     throw new Error(
       'Failed to re-upload file. See debug logs for more information.'
     )
   }
+
+  return reUploadReponse.data.version_id
 }
 
 /**
@@ -284,7 +297,7 @@ async function uploadZip(
   chunkSize: number,
   cookies: string
 ): Promise<void> {
-  await startReupload(zipPath, assetId, chunkSize, cookies)
+  const versionId = await startReupload(zipPath, assetId, chunkSize, cookies)
 
   let chunkIndex = 0
 
@@ -302,10 +315,12 @@ async function uploadZip(
       contentType: 'application/octet-stream'
     })
 
-    await axios.post(getUrl('UPLOAD_CHUNK', assetId), form, {
+    await axios.post(getUrl('UPLOAD_CHUNK', assetId, versionId.toString()), form, {
       headers: {
         ...form.getHeaders(),
-        Cookie: cookies
+        Cookie: cookies,
+        Origin: 'https://portal.cfx.re',
+        Referer: 'https://portal.cfx.re/'
       }
     })
 
@@ -314,7 +329,7 @@ async function uploadZip(
     chunkIndex++
   }
 
-  await completeUpload(assetId, cookies)
+  await completeUpload(assetId, versionId, cookies)
 }
 
 /**
@@ -323,13 +338,15 @@ async function uploadZip(
  * @param cookies
  * @returns {Promise<void>} Resolves when the upload is complete.
  */
-async function completeUpload(assetId: string, cookies: string): Promise<void> {
+async function completeUpload(assetId: string, versionId: number, cookies: string): Promise<void> {
   await axios.post(
-    getUrl('COMPLETE_UPLOAD', assetId),
-    {},
+    getUrl('COMPLETE_UPLOAD', assetId, versionId.toString()),
+    undefined,
     {
       headers: {
-        Cookie: cookies
+        Cookie: cookies,
+        Origin: 'https://portal.cfx.re',
+        Referer: 'https://portal.cfx.re/'
       }
     }
   )
