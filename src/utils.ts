@@ -44,10 +44,11 @@ export async function preparePuppeteer(): Promise<void> {
 
 export async function verifyAuth(cookies: string): Promise<boolean> {
   try {
-    await axios.get('https://portal-api.cfx.re/v1/me/assets', {
-      headers: { Cookie: cookies }
+    const res = await axios.get('https://portal-api.cfx.re/v1/me/assets', {
+      headers: { Cookie: cookies },
+      validateStatus: () => true
     })
-    return true
+    return res.status < 400
   } catch {
     return false
   }
@@ -89,10 +90,16 @@ export async function resolveAssetId(
   )
 }
 
-export function getUrl(type: keyof typeof Urls, id?: string, versionId?: string): string {
+export function getUrl(
+  type: keyof typeof Urls,
+  params?: Record<string, string | number>
+): string {
   let url = Urls.API + Urls[type]
-  if (id) url = url.replace('{id}', id)
-  if (versionId) url = url.replace('{versionId}', versionId)
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      url = url.replace(`{${key}}`, value.toString())
+    }
+  }
   return url
 }
 

@@ -35,6 +35,14 @@ inputs:
     description: 'The chunk size to split the file into'
     required: false
     default: 2097152
+  version:
+    description: 'The version string for this upload (e.g. 1.0.0)'
+    required: false
+    default: '1.0.0'
+  changelog:
+    description: 'Changelog for this version'
+    required: false
+    default: ''
 
 runs:
   using: node20

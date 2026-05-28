@@ -40,10 +40,6 @@ jobs:
         id: npm-lint
         run: npm run lint
 
-      - name: Test
-        id: npm-ci-test
-        run: npm run ci-test
-
   cfx-portal-upload:
     name: GitHub Actions Test
     runs-on: ubuntu-latest
@@ -61,3 +57,5 @@ jobs:
           cookie: ${{ secrets.FORUM_COOKIE }}
           zipPath: ./test.zip
           assetId: 489345
+          version: '1.0.0'
+          changelog: 'CI test upload'

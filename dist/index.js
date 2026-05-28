@@ -18082,85 +18082,6 @@ module.exports = crc32;
 
 /***/ }),
 
-/***/ 52337:
-/***/ ((module) => {
-
-/* eslint-disable node/no-deprecated-api */
-
-var toString = Object.prototype.toString
-
-var isModern = (
-  typeof Buffer !== 'undefined' &&
-  typeof Buffer.alloc === 'function' &&
-  typeof Buffer.allocUnsafe === 'function' &&
-  typeof Buffer.from === 'function'
-)
-
-function isArrayBuffer (input) {
-  return toString.call(input).slice(8, -1) === 'ArrayBuffer'
-}
-
-function fromArrayBuffer (obj, byteOffset, length) {
-  byteOffset >>>= 0
-
-  var maxLength = obj.byteLength - byteOffset
-
-  if (maxLength < 0) {
-    throw new RangeError("'offset' is out of bounds")
-  }
-
-  if (length === undefined) {
-    length = maxLength
-  } else {
-    length >>>= 0
-
-    if (length > maxLength) {
-      throw new RangeError("'length' is out of bounds")
-    }
-  }
-
-  return isModern
-    ? Buffer.from(obj.slice(byteOffset, byteOffset + length))
-    : new Buffer(new Uint8Array(obj.slice(byteOffset, byteOffset + length)))
-}
-
-function fromString (string, encoding) {
-  if (typeof encoding !== 'string' || encoding === '') {
-    encoding = 'utf8'
-  }
-
-  if (!Buffer.isEncoding(encoding)) {
-    throw new TypeError('"encoding" must be a valid string encoding')
-  }
-
-  return isModern
-    ? Buffer.from(string, encoding)
-    : new Buffer(string, encoding)
-}
-
-function bufferFrom (value, encodingOrOffset, length) {
-  if (typeof value === 'number') {
-    throw new TypeError('"value" argument must not be a number')
-  }
-
-  if (isArrayBuffer(value)) {
-    return fromArrayBuffer(value, encodingOrOffset, length)
-  }
-
-  if (typeof value === 'string') {
-    return fromString(value, encodingOrOffset)
-  }
-
-  return isModern
-    ? Buffer.from(value)
-    : new Buffer(value)
-}
-
-module.exports = bufferFrom
-
-
-/***/ }),
-
 /***/ 84060:
 /***/ ((module) => {
 
@@ -62469,580 +62390,6 @@ __exportStar(__nccwpck_require__(57142), exports);
 
 /***/ }),
 
-/***/ 3622:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-var SourceMapConsumer = (__nccwpck_require__(62618).SourceMapConsumer);
-var path = __nccwpck_require__(16928);
-
-var fs;
-try {
-  fs = __nccwpck_require__(79896);
-  if (!fs.existsSync || !fs.readFileSync) {
-    // fs doesn't have all methods we need
-    fs = null;
-  }
-} catch (err) {
-  /* nop */
-}
-
-var bufferFrom = __nccwpck_require__(52337);
-
-// Only install once if called multiple times
-var errorFormatterInstalled = false;
-var uncaughtShimInstalled = false;
-
-// If true, the caches are reset before a stack trace formatting operation
-var emptyCacheBetweenOperations = false;
-
-// Supports {browser, node, auto}
-var environment = "auto";
-
-// Maps a file path to a string containing the file contents
-var fileContentsCache = {};
-
-// Maps a file path to a source map for that file
-var sourceMapCache = {};
-
-// Regex for detecting source maps
-var reSourceMap = /^data:application\/json[^,]+base64,/;
-
-// Priority list of retrieve handlers
-var retrieveFileHandlers = [];
-var retrieveMapHandlers = [];
-
-function isInBrowser() {
-  if (environment === "browser")
-    return true;
-  if (environment === "node")
-    return false;
-  return ((typeof window !== 'undefined') && (typeof XMLHttpRequest === 'function') && !(window.require && window.module && window.process && window.process.type === "renderer"));
-}
-
-function hasGlobalProcessEventEmitter() {
-  return ((typeof process === 'object') && (process !== null) && (typeof process.on === 'function'));
-}
-
-function handlerExec(list) {
-  return function(arg) {
-    for (var i = 0; i < list.length; i++) {
-      var ret = list[i](arg);
-      if (ret) {
-        return ret;
-      }
-    }
-    return null;
-  };
-}
-
-var retrieveFile = handlerExec(retrieveFileHandlers);
-
-retrieveFileHandlers.push(function(path) {
-  // Trim the path to make sure there is no extra whitespace.
-  path = path.trim();
-  if (/^file:/.test(path)) {
-    // existsSync/readFileSync can't handle file protocol, but once stripped, it works
-    path = path.replace(/file:\/\/\/(\w:)?/, function(protocol, drive) {
-      return drive ?
-        '' : // file:///C:/dir/file -> C:/dir/file
-        '/'; // file:///root-dir/file -> /root-dir/file
-    });
-  }
-  if (path in fileContentsCache) {
-    return fileContentsCache[path];
-  }
-
-  var contents = '';
-  try {
-    if (!fs) {
-      // Use SJAX if we are in the browser
-      var xhr = new XMLHttpRequest();
-      xhr.open('GET', path, /** async */ false);
-      xhr.send(null);
-      if (xhr.readyState === 4 && xhr.status === 200) {
-        contents = xhr.responseText;
-      }
-    } else if (fs.existsSync(path)) {
-      // Otherwise, use the filesystem
-      contents = fs.readFileSync(path, 'utf8');
-    }
-  } catch (er) {
-    /* ignore any errors */
-  }
-
-  return fileContentsCache[path] = contents;
-});
-
-// Support URLs relative to a directory, but be careful about a protocol prefix
-// in case we are in the browser (i.e. directories may start with "http://" or "file:///")
-function supportRelativeURL(file, url) {
-  if (!file) return url;
-  var dir = path.dirname(file);
-  var match = /^\w+:\/\/[^\/]*/.exec(dir);
-  var protocol = match ? match[0] : '';
-  var startPath = dir.slice(protocol.length);
-  if (protocol && /^\/\w\:/.test(startPath)) {
-    // handle file:///C:/ paths
-    protocol += '/';
-    return protocol + path.resolve(dir.slice(protocol.length), url).replace(/\\/g, '/');
-  }
-  return protocol + path.resolve(dir.slice(protocol.length), url);
-}
-
-function retrieveSourceMapURL(source) {
-  var fileData;
-
-  if (isInBrowser()) {
-     try {
-       var xhr = new XMLHttpRequest();
-       xhr.open('GET', source, false);
-       xhr.send(null);
-       fileData = xhr.readyState === 4 ? xhr.responseText : null;
-
-       // Support providing a sourceMappingURL via the SourceMap header
-       var sourceMapHeader = xhr.getResponseHeader("SourceMap") ||
-                             xhr.getResponseHeader("X-SourceMap");
-       if (sourceMapHeader) {
-         return sourceMapHeader;
-       }
-     } catch (e) {
-     }
-  }
-
-  // Get the URL of the source map
-  fileData = retrieveFile(source);
-  var re = /(?:\/\/[@#][\s]*sourceMappingURL=([^\s'"]+)[\s]*$)|(?:\/\*[@#][\s]*sourceMappingURL=([^\s*'"]+)[\s]*(?:\*\/)[\s]*$)/mg;
-  // Keep executing the search to find the *last* sourceMappingURL to avoid
-  // picking up sourceMappingURLs from comments, strings, etc.
-  var lastMatch, match;
-  while (match = re.exec(fileData)) lastMatch = match;
-  if (!lastMatch) return null;
-  return lastMatch[1];
-};
-
-// Can be overridden by the retrieveSourceMap option to install. Takes a
-// generated source filename; returns a {map, optional url} object, or null if
-// there is no source map.  The map field may be either a string or the parsed
-// JSON object (ie, it must be a valid argument to the SourceMapConsumer
-// constructor).
-var retrieveSourceMap = handlerExec(retrieveMapHandlers);
-retrieveMapHandlers.push(function(source) {
-  var sourceMappingURL = retrieveSourceMapURL(source);
-  if (!sourceMappingURL) return null;
-
-  // Read the contents of the source map
-  var sourceMapData;
-  if (reSourceMap.test(sourceMappingURL)) {
-    // Support source map URL as a data url
-    var rawData = sourceMappingURL.slice(sourceMappingURL.indexOf(',') + 1);
-    sourceMapData = bufferFrom(rawData, "base64").toString();
-    sourceMappingURL = source;
-  } else {
-    // Support source map URLs relative to the source URL
-    sourceMappingURL = supportRelativeURL(source, sourceMappingURL);
-    sourceMapData = retrieveFile(sourceMappingURL);
-  }
-
-  if (!sourceMapData) {
-    return null;
-  }
-
-  return {
-    url: sourceMappingURL,
-    map: sourceMapData
-  };
-});
-
-function mapSourcePosition(position) {
-  var sourceMap = sourceMapCache[position.source];
-  if (!sourceMap) {
-    // Call the (overrideable) retrieveSourceMap function to get the source map.
-    var urlAndMap = retrieveSourceMap(position.source);
-    if (urlAndMap) {
-      sourceMap = sourceMapCache[position.source] = {
-        url: urlAndMap.url,
-        map: new SourceMapConsumer(urlAndMap.map)
-      };
-
-      // Load all sources stored inline with the source map into the file cache
-      // to pretend like they are already loaded. They may not exist on disk.
-      if (sourceMap.map.sourcesContent) {
-        sourceMap.map.sources.forEach(function(source, i) {
-          var contents = sourceMap.map.sourcesContent[i];
-          if (contents) {
-            var url = supportRelativeURL(sourceMap.url, source);
-            fileContentsCache[url] = contents;
-          }
-        });
-      }
-    } else {
-      sourceMap = sourceMapCache[position.source] = {
-        url: null,
-        map: null
-      };
-    }
-  }
-
-  // Resolve the source URL relative to the URL of the source map
-  if (sourceMap && sourceMap.map && typeof sourceMap.map.originalPositionFor === 'function') {
-    var originalPosition = sourceMap.map.originalPositionFor(position);
-
-    // Only return the original position if a matching line was found. If no
-    // matching line is found then we return position instead, which will cause
-    // the stack trace to print the path and line for the compiled file. It is
-    // better to give a precise location in the compiled file than a vague
-    // location in the original file.
-    if (originalPosition.source !== null) {
-      originalPosition.source = supportRelativeURL(
-        sourceMap.url, originalPosition.source);
-      return originalPosition;
-    }
-  }
-
-  return position;
-}
-
-// Parses code generated by FormatEvalOrigin(), a function inside V8:
-// https://code.google.com/p/v8/source/browse/trunk/src/messages.js
-function mapEvalOrigin(origin) {
-  // Most eval() calls are in this format
-  var match = /^eval at ([^(]+) \((.+):(\d+):(\d+)\)$/.exec(origin);
-  if (match) {
-    var position = mapSourcePosition({
-      source: match[2],
-      line: +match[3],
-      column: match[4] - 1
-    });
-    return 'eval at ' + match[1] + ' (' + position.source + ':' +
-      position.line + ':' + (position.column + 1) + ')';
-  }
-
-  // Parse nested eval() calls using recursion
-  match = /^eval at ([^(]+) \((.+)\)$/.exec(origin);
-  if (match) {
-    return 'eval at ' + match[1] + ' (' + mapEvalOrigin(match[2]) + ')';
-  }
-
-  // Make sure we still return useful information if we didn't find anything
-  return origin;
-}
-
-// This is copied almost verbatim from the V8 source code at
-// https://code.google.com/p/v8/source/browse/trunk/src/messages.js. The
-// implementation of wrapCallSite() used to just forward to the actual source
-// code of CallSite.prototype.toString but unfortunately a new release of V8
-// did something to the prototype chain and broke the shim. The only fix I
-// could find was copy/paste.
-function CallSiteToString() {
-  var fileName;
-  var fileLocation = "";
-  if (this.isNative()) {
-    fileLocation = "native";
-  } else {
-    fileName = this.getScriptNameOrSourceURL();
-    if (!fileName && this.isEval()) {
-      fileLocation = this.getEvalOrigin();
-      fileLocation += ", ";  // Expecting source position to follow.
-    }
-
-    if (fileName) {
-      fileLocation += fileName;
-    } else {
-      // Source code does not originate from a file and is not native, but we
-      // can still get the source position inside the source string, e.g. in
-      // an eval string.
-      fileLocation += "<anonymous>";
-    }
-    var lineNumber = this.getLineNumber();
-    if (lineNumber != null) {
-      fileLocation += ":" + lineNumber;
-      var columnNumber = this.getColumnNumber();
-      if (columnNumber) {
-        fileLocation += ":" + columnNumber;
-      }
-    }
-  }
-
-  var line = "";
-  var functionName = this.getFunctionName();
-  var addSuffix = true;
-  var isConstructor = this.isConstructor();
-  var isMethodCall = !(this.isToplevel() || isConstructor);
-  if (isMethodCall) {
-    var typeName = this.getTypeName();
-    // Fixes shim to be backward compatable with Node v0 to v4
-    if (typeName === "[object Object]") {
-      typeName = "null";
-    }
-    var methodName = this.getMethodName();
-    if (functionName) {
-      if (typeName && functionName.indexOf(typeName) != 0) {
-        line += typeName + ".";
-      }
-      line += functionName;
-      if (methodName && functionName.indexOf("." + methodName) != functionName.length - methodName.length - 1) {
-        line += " [as " + methodName + "]";
-      }
-    } else {
-      line += typeName + "." + (methodName || "<anonymous>");
-    }
-  } else if (isConstructor) {
-    line += "new " + (functionName || "<anonymous>");
-  } else if (functionName) {
-    line += functionName;
-  } else {
-    line += fileLocation;
-    addSuffix = false;
-  }
-  if (addSuffix) {
-    line += " (" + fileLocation + ")";
-  }
-  return line;
-}
-
-function cloneCallSite(frame) {
-  var object = {};
-  Object.getOwnPropertyNames(Object.getPrototypeOf(frame)).forEach(function(name) {
-    object[name] = /^(?:is|get)/.test(name) ? function() { return frame[name].call(frame); } : frame[name];
-  });
-  object.toString = CallSiteToString;
-  return object;
-}
-
-function wrapCallSite(frame) {
-  if(frame.isNative()) {
-    return frame;
-  }
-
-  // Most call sites will return the source file from getFileName(), but code
-  // passed to eval() ending in "//# sourceURL=..." will return the source file
-  // from getScriptNameOrSourceURL() instead
-  var source = frame.getFileName() || frame.getScriptNameOrSourceURL();
-  if (source) {
-    var line = frame.getLineNumber();
-    var column = frame.getColumnNumber() - 1;
-
-    // Fix position in Node where some (internal) code is prepended.
-    // See https://github.com/evanw/node-source-map-support/issues/36
-    var headerLength = 62;
-    if (line === 1 && column > headerLength && !isInBrowser() && !frame.isEval()) {
-      column -= headerLength;
-    }
-
-    var position = mapSourcePosition({
-      source: source,
-      line: line,
-      column: column
-    });
-    frame = cloneCallSite(frame);
-    var originalFunctionName = frame.getFunctionName;
-    frame.getFunctionName = function() { return position.name || originalFunctionName(); };
-    frame.getFileName = function() { return position.source; };
-    frame.getLineNumber = function() { return position.line; };
-    frame.getColumnNumber = function() { return position.column + 1; };
-    frame.getScriptNameOrSourceURL = function() { return position.source; };
-    return frame;
-  }
-
-  // Code called using eval() needs special handling
-  var origin = frame.isEval() && frame.getEvalOrigin();
-  if (origin) {
-    origin = mapEvalOrigin(origin);
-    frame = cloneCallSite(frame);
-    frame.getEvalOrigin = function() { return origin; };
-    return frame;
-  }
-
-  // If we get here then we were unable to change the source position
-  return frame;
-}
-
-// This function is part of the V8 stack trace API, for more info see:
-// https://v8.dev/docs/stack-trace-api
-function prepareStackTrace(error, stack) {
-  if (emptyCacheBetweenOperations) {
-    fileContentsCache = {};
-    sourceMapCache = {};
-  }
-
-  var name = error.name || 'Error';
-  var message = error.message || '';
-  var errorString = name + ": " + message;
-
-  return errorString + stack.map(function(frame) {
-    return '\n    at ' + wrapCallSite(frame);
-  }).join('');
-}
-
-// Generate position and snippet of original source with pointer
-function getErrorSource(error) {
-  var match = /\n    at [^(]+ \((.*):(\d+):(\d+)\)/.exec(error.stack);
-  if (match) {
-    var source = match[1];
-    var line = +match[2];
-    var column = +match[3];
-
-    // Support the inline sourceContents inside the source map
-    var contents = fileContentsCache[source];
-
-    // Support files on disk
-    if (!contents && fs && fs.existsSync(source)) {
-      try {
-        contents = fs.readFileSync(source, 'utf8');
-      } catch (er) {
-        contents = '';
-      }
-    }
-
-    // Format the line from the original source code like node does
-    if (contents) {
-      var code = contents.split(/(?:\r\n|\r|\n)/)[line - 1];
-      if (code) {
-        return source + ':' + line + '\n' + code + '\n' +
-          new Array(column).join(' ') + '^';
-      }
-    }
-  }
-  return null;
-}
-
-function printErrorAndExit (error) {
-  var source = getErrorSource(error);
-
-  // Ensure error is printed synchronously and not truncated
-  if (process.stderr._handle && process.stderr._handle.setBlocking) {
-    process.stderr._handle.setBlocking(true);
-  }
-
-  if (source) {
-    console.error();
-    console.error(source);
-  }
-
-  console.error(error.stack);
-  process.exit(1);
-}
-
-function shimEmitUncaughtException () {
-  var origEmit = process.emit;
-
-  process.emit = function (type) {
-    if (type === 'uncaughtException') {
-      var hasStack = (arguments[1] && arguments[1].stack);
-      var hasListeners = (this.listeners(type).length > 0);
-
-      if (hasStack && !hasListeners) {
-        return printErrorAndExit(arguments[1]);
-      }
-    }
-
-    return origEmit.apply(this, arguments);
-  };
-}
-
-var originalRetrieveFileHandlers = retrieveFileHandlers.slice(0);
-var originalRetrieveMapHandlers = retrieveMapHandlers.slice(0);
-
-exports.wrapCallSite = wrapCallSite;
-exports.getErrorSource = getErrorSource;
-exports.mapSourcePosition = mapSourcePosition;
-exports.retrieveSourceMap = retrieveSourceMap;
-
-exports.install = function(options) {
-  options = options || {};
-
-  if (options.environment) {
-    environment = options.environment;
-    if (["node", "browser", "auto"].indexOf(environment) === -1) {
-      throw new Error("environment " + environment + " was unknown. Available options are {auto, browser, node}")
-    }
-  }
-
-  // Allow sources to be found by methods other than reading the files
-  // directly from disk.
-  if (options.retrieveFile) {
-    if (options.overrideRetrieveFile) {
-      retrieveFileHandlers.length = 0;
-    }
-
-    retrieveFileHandlers.unshift(options.retrieveFile);
-  }
-
-  // Allow source maps to be found by methods other than reading the files
-  // directly from disk.
-  if (options.retrieveSourceMap) {
-    if (options.overrideRetrieveSourceMap) {
-      retrieveMapHandlers.length = 0;
-    }
-
-    retrieveMapHandlers.unshift(options.retrieveSourceMap);
-  }
-
-  // Support runtime transpilers that include inline source maps
-  if (options.hookRequire && !isInBrowser()) {
-    var Module;
-    try {
-      Module = __nccwpck_require__(73339);
-    } catch (err) {
-      // NOP: Loading in catch block to convert webpack error to warning.
-    }
-    var $compile = Module.prototype._compile;
-
-    if (!$compile.__sourceMapSupport) {
-      Module.prototype._compile = function(content, filename) {
-        fileContentsCache[filename] = content;
-        sourceMapCache[filename] = undefined;
-        return $compile.call(this, content, filename);
-      };
-
-      Module.prototype._compile.__sourceMapSupport = true;
-    }
-  }
-
-  // Configure options
-  if (!emptyCacheBetweenOperations) {
-    emptyCacheBetweenOperations = 'emptyCacheBetweenOperations' in options ?
-      options.emptyCacheBetweenOperations : false;
-  }
-
-  // Install the error reformatter
-  if (!errorFormatterInstalled) {
-    errorFormatterInstalled = true;
-    Error.prepareStackTrace = prepareStackTrace;
-  }
-
-  if (!uncaughtShimInstalled) {
-    var installHandler = 'handleUncaughtExceptions' in options ?
-      options.handleUncaughtExceptions : true;
-
-    // Provide the option to not install the uncaught exception handler. This is
-    // to support other uncaught exception handlers (in test frameworks, for
-    // example). If this handler is not installed and there are no other uncaught
-    // exception handlers, uncaught exceptions will be caught by node's built-in
-    // exception handler and the process will still be terminated. However, the
-    // generated JavaScript code will be shown above the stack trace instead of
-    // the original source code.
-    if (installHandler && hasGlobalProcessEventEmitter()) {
-      uncaughtShimInstalled = true;
-      shimEmitUncaughtException();
-    }
-  }
-};
-
-exports.resetRetrieveHandlers = function() {
-  retrieveFileHandlers.length = 0;
-  retrieveMapHandlers.length = 0;
-
-  retrieveFileHandlers = originalRetrieveFileHandlers.slice(0);
-  retrieveMapHandlers = originalRetrieveMapHandlers.slice(0);
-  
-  retrieveSourceMap = handlerExec(retrieveMapHandlers);
-  retrieveFile = handlerExec(retrieveFileHandlers);
-}
-
-
-/***/ }),
-
 /***/ 76934:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -63972,7 +63319,7 @@ SourceMapConsumer.prototype.allGeneratedPositionsFor =
     return mappings;
   };
 
-exports.SourceMapConsumer = SourceMapConsumer;
+__webpack_unused_export__ = SourceMapConsumer;
 
 /**
  * A BasicSourceMapConsumer instance represents a parsed source map which we can
@@ -66226,7 +65573,7 @@ exports.computeSourceURL = computeSourceURL;
  * http://opensource.org/licenses/BSD-3-Clause
  */
 /* unused reexport */ __nccwpck_require__(62574)/* .SourceMapGenerator */ .x;
-exports.SourceMapConsumer = __nccwpck_require__(79907).SourceMapConsumer;
+/* unused reexport */ __nccwpck_require__(79907);
 exports.SourceNode = __nccwpck_require__(49706).SourceNode;
 
 
@@ -78471,7 +77818,7 @@ var sys = (() => {
       debugMode: !!process.env.NODE_INSPECTOR_IPC || !!process.env.VSCODE_INSPECTOR_OPTIONS || some(process.execArgv, (arg) => /^--(?:inspect|debug)(?:-brk)?(?:=\d+)?$/i.test(arg)) || !!process.recordreplay,
       tryEnableSourceMapsForHost() {
         try {
-          (__nccwpck_require__(3622).install)();
+          (__nccwpck_require__(5549).install)();
         } catch {
         }
       },
@@ -296127,10 +295474,19 @@ const axios_1 = __importDefault(__nccwpck_require__(87269));
 const fs_1 = __nccwpck_require__(79896);
 const path_1 = __nccwpck_require__(16928);
 const utils_1 = __nccwpck_require__(71798);
-/**
- * The main function for the action.
- * @returns {Promise<void>} Resolves when the action is complete.
- */
+const BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    'sec-ch-ua': '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-fetch-site': 'same-site',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-dest': 'empty',
+    'accept': '*/*',
+    'accept-language': 'en-US,en;q=0.9',
+    Origin: 'https://portal.cfx.re',
+    Referer: 'https://portal.cfx.re/'
+};
 async function run() {
     await (0, utils_1.preparePuppeteer)();
     let assetId = core.getInput('assetId');
@@ -296141,31 +295497,59 @@ async function run() {
     const chunkSize = parseInt(core.getInput('chunkSize'));
     const maxRetries = parseInt(core.getInput('maxRetries'));
     if (isNaN(chunkSize)) {
-        throw new Error('Invalid chunk size. Must be a number.');
+        core.setFailed('Invalid chunk size. Must be a number.');
+        return;
     }
     if (isNaN(maxRetries)) {
-        throw new Error('Invalid max retries. Must be a number.');
+        core.setFailed('Invalid max retries. Must be a number.');
+        return;
     }
     if (!assetId && !assetName && !skipUpload) {
-        core.debug('No asset id or name provided, using repository name...');
         assetName = (0, path_1.basename)((0, utils_1.getEnv)('GITHUB_WORKSPACE'));
     }
+    if (skipUpload) {
+        core.info('Skipping upload ...');
+        return;
+    }
+    const version = core.getInput('version');
+    const changelog = core.getInput('changelog');
+    try {
+        zipPath = await getZipPath(assetName, zipPath, makeZip);
+    }
+    catch (error) {
+        if (error instanceof Error)
+            core.setFailed(error.message);
+        return;
+    }
+    core.info('Uploading file ...');
     const directCookie = `_t=${core.getInput('cookie')}`;
     let cookies = null;
-    core.info('Trying direct cookie auth ...');
-    if (await (0, utils_1.verifyAuth)(directCookie)) {
+    const directAuthOk = await (0, utils_1.verifyAuth)(directCookie);
+    if (directAuthOk) {
         cookies = directCookie;
-        core.info('Direct cookie auth successful.');
-    }
-    else {
-        core.info('Direct auth failed, falling back to browser SSO ...');
     }
     if (!cookies) {
+        // Browser SSO path — upload happens from inside browser context via fetch()
+        // so Akamai session binding is preserved (credentials: 'include' uses portal-api cookies)
+        const isCI = !!process.env.CI;
         const browser = await puppeteer_1.default.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            headless: isCI,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--window-size=1920,1080',
+                ...(isCI ? [] : ['--window-position=-9999,-9999'])
+            ]
         });
         const page = await browser.newPage();
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            Object.defineProperty(navigator, 'plugins', { get: () => Array.from({ length: 5 }, (_, i) => ({ name: `Plugin${i}` })) });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            // @ts-expect-error patching chrome runtime
+            window.chrome = { runtime: {} };
+        });
         try {
             const redirectUrl = await getRedirectUrl(page, maxRetries);
             await setForumCookie(browser, page);
@@ -296173,38 +295557,124 @@ async function run() {
             if (!page.url().includes('portal.cfx.re')) {
                 throw new Error('Redirect failed. Make sure the provided Cookie is valid.');
             }
-            cookies = await getCookies(browser);
+            // Prime Akamai bot management session
+            const jwtCookieRaw = await browser.cookies();
+            const jwtCookie = jwtCookieRaw.find(c => c.name === 'jwt');
+            if (jwtCookie) {
+                await browser.setCookie({ ...jwtCookie, domain: 'portal-api.cfx.re' });
+            }
+            await page.goto('https://portal-api.cfx.re/v1/me/assets', { waitUntil: 'networkidle0', timeout: 15000 }).catch(() => { });
+            await new Promise(r => setTimeout(r, 3000));
+            const jwtCookies = await getCookies(browser);
+            if (!assetId && assetName) {
+                assetId = await (0, utils_1.resolveAssetId)(assetName, jwtCookies);
+            }
+            // Navigate to assets list — establishes portal.cfx.re origin context for browser fetch
+            await page.goto('https://portal.cfx.re/assets/created-assets', { waitUntil: 'networkidle0', timeout: 30000 }).catch(() => { });
+            await new Promise(r => setTimeout(r, 3000));
+            // Search for asset then click UPLOAD NEW VERSION to initialize upload session context
+            await page.focus('input[type="search"], input[placeholder*="asset" i]').catch(() => { });
+            await page.keyboard.type(assetName || '');
+            await new Promise(r => setTimeout(r, 2000));
+            await page.evaluate(() => {
+                const btn = Array.from(document.querySelectorAll('button')).find(b => (b.textContent || '').trim().includes('UPLOAD NEW VERSION'));
+                if (btn) {
+                    btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                }
+            });
+            await new Promise(r => setTimeout(r, 2000));
+            // Upload via browser fetch — credentials:include sends all portal-api session cookies,
+            // triggering escrow processing that the API-only path (axios) does not receive
+            await uploadFromBrowser(page, zipPath, assetId, assetName, chunkSize, version, changelog);
+        }
+        catch (error) {
+            if (error instanceof Error)
+                core.setFailed(error.message);
         }
         finally {
             await browser.close();
         }
+        return;
     }
+    // Direct cookie fallback (axios-based, only if _t cookie auth succeeds)
     try {
-        if (skipUpload) {
-            core.info('Skipping upload ...');
-            return;
-        }
-        core.info('Uploading file ...');
-        if (assetName) {
+        if (assetName && !assetId) {
             assetId = await (0, utils_1.resolveAssetId)(assetName, cookies);
         }
-        zipPath = await getZipPath(assetName, zipPath, makeZip);
-        await uploadZip(zipPath, assetId, chunkSize, cookies);
+        await uploadZip(zipPath, assetId, assetName, chunkSize, cookies, version, changelog);
     }
     catch (error) {
-        if (error instanceof Error) {
+        if (error instanceof Error)
             core.setFailed(error.message);
-        }
     }
 }
-/**
- * Navigates to the SSO URL and waits for the page to load.
- * If the navigation fails, it will retry up to `maxRetries` times.
- * @param page
- * @param maxRetries
- * @returns {Promise<string>} The redirect URL.
- * @throws If the navigation fails after `maxRetries` attempts.
- */
+async function uploadFromBrowser(page, zipPath, assetId, assetName, chunkSizeBytes, version, changelog) {
+    const stats = (0, fs_1.statSync)(zipPath);
+    const totalSize = stats.size;
+    const originalFileName = (0, path_1.basename)(zipPath);
+    const chunkCount = Math.ceil(totalSize / chunkSizeBytes);
+    // Start re-upload via browser fetch (credentials:include — browser sends its own portal-api cookies)
+    const reuploadResult = await page.evaluate(async (p) => {
+        const res = await fetch(`https://portal-api.cfx.re/v1/assets/${p.assetId}/re-upload`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: p.assetName || p.fileName,
+                chunk_count: p.chunkCount,
+                chunk_size: p.chunkSize,
+                total_size: p.totalSize,
+                original_file_name: p.fileName,
+                release_candidate: false,
+                version: p.version,
+                changelog: p.changelog
+            })
+        });
+        const text = await res.text();
+        return { status: res.status, body: text };
+    }, { assetId, assetName, chunkCount, chunkSize: chunkSizeBytes, totalSize, fileName: originalFileName, version, changelog });
+    if (reuploadResult.status >= 400) {
+        throw new Error(`re-upload failed with HTTP ${reuploadResult.status}: ${reuploadResult.body}`);
+    }
+    const reuploadData = JSON.parse(reuploadResult.body);
+    if (reuploadData.errors !== null) {
+        throw new Error(`re-upload errors: ${JSON.stringify(reuploadData)}`);
+    }
+    const uploadAssetId = reuploadData.asset_id;
+    const versionId = reuploadData.version_id;
+    // Upload chunks from browser context
+    const stream = (0, fs_1.createReadStream)(zipPath, { highWaterMark: chunkSizeBytes });
+    let chunkIndex = 0;
+    for await (const rawChunk of stream) {
+        const chunkBase64 = rawChunk.toString('base64');
+        const chunkResult = await page.evaluate(async (p) => {
+            const binaryStr = atob(p.chunkBase64);
+            const bytes = new Uint8Array(binaryStr.length);
+            for (let i = 0; i < binaryStr.length; i++)
+                bytes[i] = binaryStr.charCodeAt(i);
+            const form = new FormData();
+            form.append('chunk_id', p.chunkIndex.toString());
+            form.append('chunk', new Blob([bytes], { type: 'application/octet-stream' }), 'blob');
+            const res = await fetch(`https://portal-api.cfx.re/v1/assets/${p.assetId}/versions/${p.versionId}/upload-chunk`, { method: 'POST', credentials: 'include', body: form });
+            return { status: res.status, body: await res.text() };
+        }, { assetId: uploadAssetId, versionId, chunkIndex, chunkBase64 });
+        if (chunkResult.status >= 400) {
+            throw new Error(`Chunk ${chunkIndex} upload failed HTTP ${chunkResult.status}: ${chunkResult.body}`);
+        }
+        core.info(`Uploaded chunk ${chunkIndex + 1}/${chunkCount}`);
+        chunkIndex++;
+    }
+    // Complete upload from browser context
+    const completeResult = await page.evaluate(async (p) => {
+        const res = await fetch(`https://portal-api.cfx.re/v1/assets/${p.assetId}/versions/${p.versionId}/complete-upload`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        return { status: res.status, body: await res.text() };
+    }, { assetId: uploadAssetId, versionId });
+    if (completeResult.status >= 400) {
+        throw new Error(`complete-upload failed HTTP ${completeResult.status}: ${completeResult.body}`);
+    }
+    core.info('Upload completed.');
+}
 async function getRedirectUrl(page, maxRetries) {
     let loaded = false;
     let attempt = 0;
@@ -296212,12 +295682,9 @@ async function getRedirectUrl(page, maxRetries) {
     while (!loaded && attempt < maxRetries) {
         try {
             core.info('Navigating to SSO URL ...');
-            await page.goto((0, utils_1.getUrl)('SSO'), {
-                waitUntil: 'networkidle0'
-            });
+            await page.goto((0, utils_1.getUrl)('SSO'), { waitUntil: 'networkidle0' });
             core.info('Navigated to SSO URL. Parsing response body ...');
             const responseBody = await page.evaluate(() => JSON.parse(document.body.innerText));
-            core.debug('Parsed response body.');
             redirectUrl = responseBody.url;
             core.info('Redirected to Forum Origin ...');
             const forumUrl = new URL(redirectUrl).origin;
@@ -296235,12 +295702,6 @@ async function getRedirectUrl(page, maxRetries) {
     }
     return redirectUrl;
 }
-/**
- * Sets the cookie for the cfx.re login.
- * @param browser
- * @param page
- * @returns {Promise<void>} Resolves when the cookie has been set.
- */
 async function setForumCookie(browser, page) {
     core.info('Setting cookies ...');
     await browser.setCookie({
@@ -296257,89 +295718,63 @@ async function setForumCookie(browser, page) {
     await page.evaluate(() => document.write('Cookie' + document.cookie));
     core.info('Cookies set. Following redirect...');
 }
-/**
- * Gets the cookies from the browser.
- * @param browser
- * @returns {Promise<string>} Resolves with the cookies as a string.
- */
 async function getCookies(browser) {
-    return await browser
-        .cookies()
-        .then(cookies => cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; '));
+    const all = await browser.cookies();
+    const seen = new Set();
+    const deduped = all
+        .filter(c => c.domain.includes('portal') ||
+        ['jwt', 'refresh-token', 'ak_bmsc', 'bm_sv', 'sso-nonce', 'sso-nonce-sig'].includes(c.name))
+        .filter(c => {
+        if (seen.has(c.name))
+            return false;
+        seen.add(c.name);
+        return true;
+    });
+    return deduped.map(c => `${c.name}=${c.value}`).join('; ');
 }
-/**
- * Retrieves the zipPath or creates a zip based on the provided parameters.
- * @param assetName - The name of the asset.
- * @param zipPath - The path to the zip file.
- * @param makeZip - Flag indicating whether to create a zip file.
- * @returns {Promise<string>} Resolves with the path to the zip file.
- * @throws If neither zipPath nor makeZip is provided, or if the pre-zip command fails.
- */
 async function getZipPath(assetName, zipPath, makeZip) {
-    core.debug('Zip path: ' + JSON.stringify(zipPath));
     if (zipPath.length > 0) {
-        core.debug('Using provided zip path.');
         return zipPath;
     }
-    if (!makeZip && zipPath.length == 0) {
+    if (!makeZip) {
         throw new Error('Either zipPath or makeZip must be provided to upload a file.');
     }
     core.info('Creating zip file ...');
-    // Clean up github things before zipping
     (0, utils_1.deleteIfExists)('.git/');
     (0, utils_1.deleteIfExists)('.github/');
     (0, utils_1.deleteIfExists)('.vscode/');
     return (0, utils_1.zipAsset)(assetName);
 }
-/**
- * Starts the re-upload process by uploading the asset in chunks.
- * @param zipPath
- * @param assetId
- * @param chunkSize
- * @param cookies
- * @returns {Promise<void>} Resolves when the re-upload process is initiated successfully.
- * @throws If the re-upload fails due to errors in the response.
- */
-async function startReupload(zipPath, assetId, chunkSize, cookies) {
+async function startReupload(zipPath, assetId, assetName, chunkSize, cookies, version, changelog) {
     const stats = (0, fs_1.statSync)(zipPath);
     const totalSize = stats.size;
     const originalFileName = (0, path_1.basename)(zipPath);
     const chunkCount = Math.ceil(totalSize / chunkSize);
-    core.info('Starting upload ...');
-    core.debug(`Total size: ${totalSize}`);
-    core.debug(`Original file name: ${originalFileName}`);
-    core.debug(`Chunk size: ${chunkSize}`);
-    core.debug(`Chunk count: ${chunkCount}`);
-    const reUploadReponse = await axios_1.default.post((0, utils_1.getUrl)('REUPLOAD', assetId), {
+    const reuploadUrl = (0, utils_1.getUrl)('REUPLOAD', { id: assetId });
+    const requestBody = {
         chunk_count: chunkCount,
         chunk_size: chunkSize,
-        name: originalFileName,
+        name: assetName || originalFileName,
         original_file_name: originalFileName,
+        version,
+        changelog,
+        release_candidate: false,
         total_size: totalSize
-    }, {
-        headers: {
-            Cookie: cookies,
-            Origin: 'https://portal.cfx.re',
-            Referer: 'https://portal.cfx.re/'
-        }
+    };
+    const reUploadResponse = await axios_1.default.post(reuploadUrl, requestBody, {
+        headers: { Cookie: cookies, ...BROWSER_HEADERS },
+        validateStatus: () => true
     });
-    if (reUploadReponse.data.errors != null) {
-        core.debug(JSON.stringify(reUploadReponse.data.errors));
-        throw new Error('Failed to re-upload file. See debug logs for more information.');
+    if (reUploadResponse.status >= 400) {
+        throw new Error(`REUPLOAD failed with HTTP ${reUploadResponse.status}: ${JSON.stringify(reUploadResponse.data)}`);
     }
-    return reUploadReponse.data.version_id;
+    if (reUploadResponse.data.errors !== null) {
+        throw new Error(`Failed to re-upload file: ${JSON.stringify(reUploadResponse.data)}`);
+    }
+    return [reUploadResponse.data.asset_id, reUploadResponse.data.version_id];
 }
-/**
- * Uploads a zip file in chunks to the specified asset.
- * @param zipPath
- * @param assetId
- * @param chunkSize.
- * @param cookies
- * @returns {Promise<void>} Resolves when the upload is complete.
- * @throws If the upload fails at any stage.
- */
-async function uploadZip(zipPath, assetId, chunkSize, cookies) {
-    const versionId = await startReupload(zipPath, assetId, chunkSize, cookies);
+async function uploadZip(zipPath, assetId, assetName, chunkSize, cookies, version, changelog) {
+    const [assetIdReupload, versionId] = await startReupload(zipPath, assetId, assetName, chunkSize, cookies, version, changelog);
     let chunkIndex = 0;
     const stats = (0, fs_1.statSync)(zipPath);
     const totalSize = stats.size;
@@ -296352,33 +295787,28 @@ async function uploadZip(zipPath, assetId, chunkSize, cookies) {
             filename: 'blob',
             contentType: 'application/octet-stream'
         });
-        await axios_1.default.post((0, utils_1.getUrl)('UPLOAD_CHUNK', assetId, versionId.toString()), form, {
+        await axios_1.default.post((0, utils_1.getUrl)('UPLOAD_CHUNK', { id: assetIdReupload, version_id: versionId }), form, {
             headers: {
                 ...form.getHeaders(),
                 Cookie: cookies,
-                Origin: 'https://portal.cfx.re',
-                Referer: 'https://portal.cfx.re/'
+                ...BROWSER_HEADERS,
+                'sec-fetch-dest': 'empty'
             }
         });
         core.info(`Uploaded chunk ${chunkIndex + 1}/${chunkCount}`);
         chunkIndex++;
     }
-    await completeUpload(assetId, versionId, cookies);
+    await completeUpload(assetIdReupload, versionId, cookies);
 }
-/**
- * Completes the upload process.
- * @param assetId
- * @param cookies
- * @returns {Promise<void>} Resolves when the upload is complete.
- */
 async function completeUpload(assetId, versionId, cookies) {
-    await axios_1.default.post((0, utils_1.getUrl)('COMPLETE_UPLOAD', assetId, versionId.toString()), undefined, {
-        headers: {
-            Cookie: cookies,
-            Origin: 'https://portal.cfx.re',
-            Referer: 'https://portal.cfx.re/'
-        }
+    const completeUrl = (0, utils_1.getUrl)('COMPLETE_UPLOAD', { id: assetId, version_id: versionId });
+    const res = await axios_1.default.post(completeUrl, {}, {
+        headers: { Cookie: cookies, ...BROWSER_HEADERS },
+        validateStatus: () => true
     });
+    if (res.status >= 400) {
+        throw new Error(`COMPLETE_UPLOAD failed with HTTP ${res.status}: ${JSON.stringify(res.data)}`);
+    }
     core.info('Upload completed.');
 }
 
@@ -296397,8 +295827,8 @@ var Urls;
     Urls["API"] = "https://portal-api.cfx.re/v1/";
     Urls["SSO"] = "auth/discourse?return=";
     Urls["REUPLOAD"] = "assets/{id}/re-upload";
-    Urls["UPLOAD_CHUNK"] = "assets/{id}/versions/{versionId}/upload-chunk";
-    Urls["COMPLETE_UPLOAD"] = "assets/{id}/versions/{versionId}/complete-upload";
+    Urls["UPLOAD_CHUNK"] = "assets/{id}/versions/{version_id}/upload-chunk";
+    Urls["COMPLETE_UPLOAD"] = "assets/{id}/versions/{version_id}/complete-upload";
 })(Urls || (exports.Urls = Urls = {}));
 
 
@@ -296493,10 +295923,11 @@ async function preparePuppeteer() {
 }
 async function verifyAuth(cookies) {
     try {
-        await axios_1.default.get('https://portal-api.cfx.re/v1/me/assets', {
-            headers: { Cookie: cookies }
+        const res = await axios_1.default.get('https://portal-api.cfx.re/v1/me/assets', {
+            headers: { Cookie: cookies },
+            validateStatus: () => true
         });
-        return true;
+        return res.status < 400;
     }
     catch {
         return false;
@@ -296523,12 +295954,13 @@ async function resolveAssetId(name, cookies) {
     core.debug(JSON.stringify(search.data));
     throw new Error(`Failed to find asset id for "${name}" exact match. See debug logs for more information.`);
 }
-function getUrl(type, id, versionId) {
+function getUrl(type, params) {
     let url = types_1.Urls.API + types_1.Urls[type];
-    if (id)
-        url = url.replace('{id}', id);
-    if (versionId)
-        url = url.replace('{versionId}', versionId);
+    if (params) {
+        for (const [key, value] of Object.entries(params)) {
+            url = url.replace(`{${key}}`, value.toString());
+        }
+    }
     return url;
 }
 function buildTree(currentPath) {
@@ -296614,6 +296046,14 @@ function deleteIfExists(_path) {
 /***/ ((module) => {
 
 module.exports = eval("require")("bufferutil");
+
+
+/***/ }),
+
+/***/ 5549:
+/***/ ((module) => {
+
+module.exports = eval("require")("source-map-support");
 
 
 /***/ }),

@@ -94,9 +94,9 @@ typings/
 .DS_Store
 Thumbs.db
 
-# Ignore built ts files
-__tests__/runner/*
-
 # IDE files
 .idea
 *.code-workspace
+
+# Local test files
+test.zip
