@@ -106,12 +106,19 @@ export async function run(): Promise<void> {
     })
 
     try {
-      const redirectUrl = await getRedirectUrl(page, maxRetries)
-      await setForumCookie(browser, page)
-
-      await page.goto(redirectUrl, { waitUntil: 'networkidle0' })
-
-      if (!page.url().includes('portal.cfx.re')) {
+      let portalReached = false
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        const redirectUrl = await getRedirectUrl(page, maxRetries)
+        await setForumCookie(browser, page)
+        await page.goto(redirectUrl, { waitUntil: 'networkidle0' })
+        if (page.url().includes('portal.cfx.re')) {
+          portalReached = true
+          break
+        }
+        core.info(`Portal redirect attempt ${attempt + 1}/${maxRetries} failed, retrying...`)
+        await new Promise(r => setTimeout(r, 2000))
+      }
+      if (!portalReached) {
         throw new Error('Redirect failed. Make sure the provided Cookie is valid.')
       }
 
